@@ -44,7 +44,7 @@ services:
   # 2. Supabase — Auth (GoTrue)
   # ===========================================================================
   supabase-auth:
-    image: supabase/gotrue:2.170.0
+    image: supabase/gotrue:v2.172.0
     container_name: supabase-auth
     restart: unless-stopped
     networks:
@@ -78,7 +78,7 @@ services:
   # 3a. Supabase — PostgREST
   # ===========================================================================
   supabase-rest:
-    image: postgrest/postgrest:12.2.3
+    image: postgrest/postgrest:v12.2.3
     container_name: supabase-rest
     restart: unless-stopped
     networks:
@@ -107,7 +107,7 @@ services:
   # 3b. Supabase — Realtime
   # ===========================================================================
   supabase-realtime:
-    image: supabase/realtime:2.34.47
+    image: supabase/realtime:v2.34.47
     container_name: supabase-realtime
     restart: unless-stopped
     networks:
@@ -142,7 +142,7 @@ services:
   # 3c. Supabase — Storage
   # ===========================================================================
   supabase-storage:
-    image: supabase/storage-api:1.14.5
+    image: supabase/storage-api:v1.14.6
     container_name: supabase-storage
     restart: unless-stopped
     networks:
@@ -179,7 +179,7 @@ services:
   # Supabase — ImgProxy
   # ===========================================================================
   supabase-imgproxy:
-    image: darthsim/imgproxy:3.25
+    image: darthsim/imgproxy:v3.25.0
     container_name: supabase-imgproxy
     restart: unless-stopped
     networks:
@@ -202,7 +202,7 @@ services:
   # Supabase — Meta (postgres-meta)
   # ===========================================================================
   supabase-meta:
-    image: supabase/postgres-meta:0.84.2
+    image: supabase/postgres-meta:v0.84.2
     container_name: supabase-meta
     restart: unless-stopped
     networks:
@@ -244,13 +244,11 @@ services:
         condition: service_started
     entrypoint: >
       bash -c '
-      cp /var/lib/kong/kong.yml.tpl /var/lib/kong/kong.yml &&
-      sed -i "s|\$${ANON_KEY}|$${ANON_KEY}|g" /var/lib/kong/kong.yml &&
-      sed -i "s|\$${SERVICE_ROLE_KEY}|$${SERVICE_ROLE_KEY}|g" /var/lib/kong/kong.yml &&
+      sed "s|\$${ANON_KEY}|$${ANON_KEY}|g; s|\$${SERVICE_ROLE_KEY}|$${SERVICE_ROLE_KEY}|g" /var/lib/kong/kong.yml.tpl > /tmp/kong.yml &&
       /docker-entrypoint.sh kong docker-start'
     environment:
       KONG_DATABASE: "off"
-      KONG_DECLARATIVE_CONFIG: /var/lib/kong/kong.yml
+      KONG_DECLARATIVE_CONFIG: /tmp/kong.yml
       KONG_DNS_ORDER: LAST,A,CNAME
       KONG_PLUGINS: request-transformer,cors,key-auth,acl,request-termination
       KONG_NGINX_PROXY_PROXY_BUFFER_SIZE: 160k
@@ -270,7 +268,7 @@ services:
   # 5. Supabase — Studio
   # ===========================================================================
   supabase-studio:
-    image: supabase/studio:20250317-6be3e41
+    image: supabase/studio:20250113-83c9420
     container_name: supabase-studio
     restart: unless-stopped
     networks:
@@ -301,7 +299,7 @@ services:
   # 6. n8n
   # ===========================================================================
   n8n:
-    image: n8nio/n8n:1.80.4
+    image: n8nio/n8n:1.123.16
     container_name: n8n
     restart: unless-stopped
     networks:
@@ -431,7 +429,7 @@ services:
   # 11. Uptime Kuma
   # ===========================================================================
   uptime-kuma:
-    image: louislam/uptime-kuma:1.23
+    image: louislam/uptime-kuma:1.23.16
     container_name: uptime-kuma
     restart: unless-stopped
     networks:
@@ -479,6 +477,7 @@ services:
       STATUS_SUBDOMAIN: ${STATUS_SUBDOMAIN}
       STUDIO_BASIC_AUTH_USER: ${STUDIO_BASIC_AUTH_USER}
       STUDIO_BASIC_AUTH_PASSWORD_HASH: ${STUDIO_BASIC_AUTH_PASSWORD_HASH}
+      ACME_EMAIL: ${ACME_EMAIL}
       TZ: ${TZ}
     volumes:
       - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro

@@ -191,6 +191,9 @@ DOMAIN=${DOMAIN}
 # Часовой пояс
 TZ=${TZ}
 
+# ACME Email (Let's Encrypt)
+ACME_EMAIL=admin@${DOMAIN}
+
 # Поддомены
 N8N_SUBDOMAIN=n8n
 SUPABASE_SUBDOMAIN=supabase
