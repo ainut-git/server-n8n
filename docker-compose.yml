@@ -1,0 +1,497 @@
+# =============================================================================
+# Server n8n — Docker Compose
+# =============================================================================
+
+networks:
+  server-net:
+    driver: bridge
+
+volumes:
+  supabase-db-data:
+  supabase-storage-data:
+  n8n-data:
+  shared-data:
+  caddy-data:
+  caddy-config:
+  loki-data:
+  grafana-data:
+  uptime-kuma-data:
+  promtail-positions:
+
+services:
+  # ===========================================================================
+  # 1. Supabase — Postgres
+  # ===========================================================================
+  supabase-db:
+    image: supabase/postgres:15.8.1.060
+    container_name: supabase-db
+    restart: unless-stopped
+    networks:
+      - server-net
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      TZ: ${TZ}
+      JWT_SECRET: ${JWT_SECRET}
+    volumes:
+      - supabase-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ${POSTGRES_DB:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================================================
+  # 2. Supabase — Auth (GoTrue)
+  # ===========================================================================
+  supabase-auth:
+    image: supabase/gotrue:v2.186.0
+    container_name: supabase-auth
+    restart: unless-stopped
+    networks:
+      - server-net
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 9999
+      API_EXTERNAL_URL: https://${SUPABASE_SUBDOMAIN}.${DOMAIN}
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@supabase-db:5432/${POSTGRES_DB:-postgres}
+      GOTRUE_SITE_URL: ${GOTRUE_SITE_URL:-https://${SUPABASE_SUBDOMAIN}.${DOMAIN}}
+      GOTRUE_URI_ALLOW_LIST: ${GOTRUE_URI_ALLOW_LIST:-}
+      GOTRUE_DISABLE_SIGNUP: ${GOTRUE_DISABLE_SIGNUP:-false}
+      GOTRUE_JWT_SECRET: ${JWT_SECRET}
+      GOTRUE_JWT_EXP: 3600
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: ${GOTRUE_EXTERNAL_EMAIL_ENABLED:-true}
+      GOTRUE_MAILER_AUTOCONFIRM: ${GOTRUE_MAILER_AUTOCONFIRM:-true}
+      GOTRUE_SMS_AUTOCONFIRM: ${GOTRUE_SMS_AUTOCONFIRM:-true}
+      TZ: ${TZ}
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9999/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ===========================================================================
+  # 3a. Supabase — PostgREST
+  # ===========================================================================
+  supabase-rest:
+    image: postgrest/postgrest:v12.2.3
+    container_name: supabase-rest
+    restart: unless-stopped
+    networks:
+      - server-net
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+      supabase-auth:
+        condition: service_started
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@supabase-db:5432/${POSTGRES_DB:-postgres}
+      PGRST_DB_SCHEMAS: ${PGRST_DB_SCHEMAS:-public,storage,graphql_public}
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+      PGRST_APP_SETTINGS_JWT_SECRET: ${JWT_SECRET}
+      PGRST_APP_SETTINGS_JWT_EXP: 3600
+      TZ: ${TZ}
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /proc/1/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ===========================================================================
+  # 3b. Supabase — Realtime
+  # ===========================================================================
+  supabase-realtime:
+    image: supabase/realtime:v2.34.47
+    container_name: supabase-realtime
+    restart: unless-stopped
+    networks:
+      - server-net
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+      supabase-auth:
+        condition: service_started
+    environment:
+      PORT: 4000
+      DB_HOST: supabase-db
+      DB_PORT: 5432
+      DB_USER: supabase_admin
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB:-postgres}
+      DB_AFTER_CONNECT_QUERY: "SET search_path TO _realtime"
+      DB_ENC_KEY: ${REALTIME_ENC_KEY}
+      API_JWT_SECRET: ${JWT_SECRET}
+      SECRET_KEY_BASE: ${JWT_SECRET}
+      ERL_AFLAGS: "-proto_dist inet_tcp"
+      ENABLE_TAILSCALE: "false"
+      DNS_NODES: "''"
+      RLIMIT_NOFILE: 65536
+      APP_NAME: supabase-realtime
+      TZ: ${TZ}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4000/api/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ===========================================================================
+  # 3c. Supabase — Storage
+  # ===========================================================================
+  supabase-storage:
+    image: supabase/storage-api:v1.33.0
+    container_name: supabase-storage
+    restart: unless-stopped
+    networks:
+      - server-net
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+      supabase-auth:
+        condition: service_started
+    environment:
+      ANON_KEY: ${ANON_KEY}
+      SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      POSTGREST_URL: http://supabase-rest:3000
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      DATABASE_URL: postgres://supabase_storage_admin:${POSTGRES_PASSWORD}@supabase-db:5432/${POSTGRES_DB:-postgres}
+      FILE_SIZE_LIMIT: 52428800
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-file}
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      TENANT_ID: stub
+      REGION: stub
+      GLOBAL_S3_BUCKET: ${GLOBAL_S3_BUCKET:-stub}
+      ENABLE_IMAGE_TRANSFORMATION: "true"
+      IMGPROXY_URL: http://supabase-imgproxy:8080
+      TZ: ${TZ}
+    volumes:
+      - supabase-storage-data:/var/lib/storage
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:5000/status || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ===========================================================================
+  # Supabase — ImgProxy
+  # ===========================================================================
+  supabase-imgproxy:
+    image: darthsim/imgproxy:v3.27.0
+    container_name: supabase-imgproxy
+    restart: unless-stopped
+    networks:
+      - server-net
+    environment:
+      IMGPROXY_BIND: ":8080"
+      IMGPROXY_LOCAL_FILESYSTEM_ROOT: /
+      IMGPROXY_USE_ETAG: "true"
+      IMGPROXY_ENABLE_WEBP_DETECTION: ${IMGPROXY_ENABLE_WEBP_DETECTION:-true}
+      TZ: ${TZ}
+    volumes:
+      - supabase-storage-data:/var/lib/storage:ro
+    healthcheck:
+      test: ["CMD", "imgproxy", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ===========================================================================
+  # Supabase — Meta (postgres-meta)
+  # ===========================================================================
+  supabase-meta:
+    image: supabase/postgres-meta:v0.86.0
+    container_name: supabase-meta
+    restart: unless-stopped
+    networks:
+      - server-net
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+    environment:
+      PG_META_PORT: 8080
+      PG_META_DB_HOST: supabase-db
+      PG_META_DB_PORT: 5432
+      PG_META_DB_NAME: ${POSTGRES_DB:-postgres}
+      PG_META_DB_USER: supabase_admin
+      PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      TZ: ${TZ}
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:8080/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ===========================================================================
+  # 4. Supabase — Kong Gateway
+  # ===========================================================================
+  kong:
+    image: kong:3.9
+    container_name: kong
+    restart: unless-stopped
+    networks:
+      - server-net
+    depends_on:
+      supabase-auth:
+        condition: service_started
+      supabase-rest:
+        condition: service_started
+      supabase-realtime:
+        condition: service_started
+      supabase-storage:
+        condition: service_started
+    entrypoint: >
+      bash -c '
+      sed "s|\$${ANON_KEY}|'"$$ANON_KEY"'|g; s|\$${SERVICE_ROLE_KEY}|'"$$SERVICE_ROLE_KEY"'|g" /var/lib/kong/kong.yml.tpl > /tmp/kong.yml &&
+      /docker-entrypoint.sh kong docker-start'
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /tmp/kong.yml
+      KONG_DNS_ORDER: LAST,A,CNAME
+      KONG_PLUGINS: request-transformer,cors,key-auth,acl,request-termination
+      KONG_NGINX_PROXY_PROXY_BUFFER_SIZE: 160k
+      KONG_NGINX_PROXY_PROXY_BUFFERS: 64 160k
+      ANON_KEY: ${ANON_KEY}
+      SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
+      TZ: ${TZ}
+    volumes:
+      - ./docker/supabase/kong.yml:/var/lib/kong/kong.yml.tpl:ro
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ===========================================================================
+  # 5. Supabase — Studio
+  # ===========================================================================
+  supabase-studio:
+    image: supabase/studio:2026.01.27-sha-6aa59ff
+    container_name: supabase-studio
+    restart: unless-stopped
+    networks:
+      - server-net
+    depends_on:
+      kong:
+        condition: service_started
+    environment:
+      STUDIO_PG_META_URL: http://supabase-meta:8080
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      DEFAULT_ORGANIZATION_NAME: Default
+      DEFAULT_PROJECT_NAME: Default
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_PUBLIC_URL: https://${SUPABASE_SUBDOMAIN}.${DOMAIN}
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      AUTH_JWT_SECRET: ${JWT_SECRET}
+      NEXT_PUBLIC_ENABLE_LOGS: "true"
+      NEXT_ANALYTICS_BACKEND_PROVIDER: postgres
+      TZ: ${TZ}
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3000/api/platform/profile').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ===========================================================================
+  # 6. n8n
+  # ===========================================================================
+  n8n:
+    image: n8nio/n8n:1.123.18
+    container_name: n8n
+    restart: unless-stopped
+    networks:
+      - server-net
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+    environment:
+      N8N_HOST: ${N8N_SUBDOMAIN}.${DOMAIN}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: https
+      WEBHOOK_URL: https://${N8N_SUBDOMAIN}.${DOMAIN}/
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: supabase-db
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB:-postgres}
+      DB_POSTGRESDB_USER: n8n_user
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD}
+      DB_POSTGRESDB_SCHEMA: n8n
+      GENERIC_TIMEZONE: ${TZ}
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: 720
+      TZ: ${TZ}
+    volumes:
+      - n8n-data:/home/node/.n8n
+      - shared-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:5678/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ===========================================================================
+  # 7. Instrument Service
+  # ===========================================================================
+  instrument:
+    build:
+      context: ./docker/instrument
+      dockerfile: Dockerfile
+    container_name: instrument
+    user: "1000:1000"
+    restart: unless-stopped
+    networks:
+      - server-net
+    environment:
+      TZ: ${TZ}
+    volumes:
+      - shared-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ===========================================================================
+  # 8. Loki
+  # ===========================================================================
+  loki:
+    image: grafana/loki:3.5.0
+    container_name: loki
+    restart: unless-stopped
+    networks:
+      - server-net
+    environment:
+      TZ: ${TZ}
+    volumes:
+      - ./docker/loki/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3100/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================================================
+  # 9. Promtail
+  # ===========================================================================
+  promtail:
+    image: grafana/promtail:3.5.0
+    container_name: promtail
+    restart: unless-stopped
+    networks:
+      - server-net
+    depends_on:
+      loki:
+        condition: service_started
+    environment:
+      TZ: ${TZ}
+    volumes:
+      - ./docker/promtail/promtail-config.yml:/etc/promtail/config.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - promtail-positions:/positions
+    command: -config.file=/etc/promtail/config.yml
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/9080'"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ===========================================================================
+  # 10. Grafana
+  # ===========================================================================
+  grafana:
+    image: grafana/grafana:11.6.0
+    container_name: grafana
+    restart: unless-stopped
+    networks:
+      - server-net
+    depends_on:
+      loki:
+        condition: service_started
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_SERVER_ROOT_URL: https://${LOGS_SUBDOMAIN}.${DOMAIN}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      TZ: ${TZ}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ===========================================================================
+  # 11. Uptime Kuma
+  # ===========================================================================
+  uptime-kuma:
+    image: louislam/uptime-kuma:1.23.17
+    container_name: uptime-kuma
+    restart: unless-stopped
+    networks:
+      - server-net
+    environment:
+      TZ: ${TZ}
+    volumes:
+      - uptime-kuma-data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3001/ > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ===========================================================================
+  # 12. Caddy (reverse proxy — запускается последним)
+  # ===========================================================================
+  caddy:
+    image: caddy:2.9
+    container_name: caddy
+    restart: unless-stopped
+    networks:
+      - server-net
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    depends_on:
+      n8n:
+        condition: service_started
+      kong:
+        condition: service_started
+      supabase-studio:
+        condition: service_started
+      grafana:
+        condition: service_started
+      uptime-kuma:
+        condition: service_started
+    environment:
+      DOMAIN: ${DOMAIN}
+      N8N_SUBDOMAIN: ${N8N_SUBDOMAIN}
+      SUPABASE_SUBDOMAIN: ${SUPABASE_SUBDOMAIN}
+      STUDIO_SUBDOMAIN: ${STUDIO_SUBDOMAIN}
+      LOGS_SUBDOMAIN: ${LOGS_SUBDOMAIN}
+      STATUS_SUBDOMAIN: ${STATUS_SUBDOMAIN}
+      STUDIO_BASIC_AUTH_USER: ${STUDIO_BASIC_AUTH_USER}
+      STUDIO_BASIC_AUTH_PASSWORD_HASH: ${STUDIO_BASIC_AUTH_PASSWORD_HASH}
+      ACME_EMAIL: ${ACME_EMAIL}
+      TZ: ${TZ}
+    volumes:
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:2019/config/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3

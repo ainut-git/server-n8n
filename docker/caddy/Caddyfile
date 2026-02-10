@@ -1,0 +1,41 @@
+{
+	email {$ACME_EMAIL}
+	admin 127.0.0.1:2019
+}
+
+# n8n — нативная авторизация
+{$N8N_SUBDOMAIN}.{$DOMAIN} {
+	reverse_proxy n8n:5678
+}
+
+# Supabase API — Kong Gateway
+{$SUPABASE_SUBDOMAIN}.{$DOMAIN} {
+	reverse_proxy kong:8000
+}
+
+# Supabase Studio — Basic Auth (health endpoints excluded)
+{$STUDIO_SUBDOMAIN}.{$DOMAIN} {
+	@health_endpoints {
+		path /api/health /healthz /health
+	}
+	handle @health_endpoints {
+		reverse_proxy supabase-studio:3000
+	}
+
+	handle {
+		basic_auth {
+			{$STUDIO_BASIC_AUTH_USER} {$STUDIO_BASIC_AUTH_PASSWORD_HASH}
+		}
+		reverse_proxy supabase-studio:3000
+	}
+}
+
+# Grafana — нативная авторизация
+{$LOGS_SUBDOMAIN}.{$DOMAIN} {
+	reverse_proxy grafana:3000
+}
+
+# Uptime Kuma — нативная авторизация
+{$STATUS_SUBDOMAIN}.{$DOMAIN} {
+	reverse_proxy uptime-kuma:3001
+}
